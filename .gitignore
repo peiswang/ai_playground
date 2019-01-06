@@ -102,3 +102,7 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# imagenet
+classification/imagenet/checkpoint/
+classification/imagenet/data
