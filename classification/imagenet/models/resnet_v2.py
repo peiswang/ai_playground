@@ -29,34 +29,31 @@ def conv1x1(in_planes, out_planes, stride=1):
 class BasicBlockV2(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, pool=None):
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
         super(BasicBlockV2, self).__init__()
-        self.bn1 = nn.BatchNorm2d(inplanes)
-        self.relu1 = nn.ReLU(inplace=True)
         self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.relu2 = nn.ReLU(inplace=True)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
         self.downsample = downsample
-        self.pool = pool
         self.stride = stride
 
     def forward(self, x):
         residual = x
 
-        out = self.bn1(x)
-        out = self.relu1(out)
-        if self.pool is not None:
-            out = self.pool(out)
-        if self.downsample is not None:
-            residual = self.downsample(out)
-        out = self.conv1(out)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
 
-        out = self.bn2(out)
-        out = self.relu2(out)
         out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
 
         out += residual
+        out = self.relu(out)
 
         return out
 
@@ -64,7 +61,7 @@ class BasicBlockV2(nn.Module):
 class BottleneckV2(nn.Module):
     expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, pool=None):
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
         super(BottleneckV2, self).__init__()
         self.bn1 = nn.BatchNorm2d(inplanes)
         self.relu1 = nn.ReLU(inplace=True)
@@ -76,7 +73,6 @@ class BottleneckV2(nn.Module):
         self.relu3 = nn.ReLU(inplace=True)
         self.conv3 = conv1x1(planes, planes * self.expansion)
         self.downsample = downsample
-        self.pool = pool
         self.stride = stride
 
     def forward(self, x):
@@ -84,8 +80,6 @@ class BottleneckV2(nn.Module):
 
         out = self.bn1(x)
         out = self.relu1(out)
-        if self.pool is not None:
-            out = self.pool(out)
         if self.downsample is not None:
             residual = self.downsample(out)
         out = self.conv1(out)
@@ -108,9 +102,9 @@ class ResNetV2(nn.Module):
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False):
         super(ResNetV2, self).__init__()
         self.inplanes = 64
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, 
-                               bias=False)
-        self.layer1 = self._make_layer(block, 64, layers[0], pool=True)
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
@@ -136,20 +130,16 @@ class ResNetV2(nn.Module):
                 elif isinstance(m, BasicBlockV2):
                     nn.init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, block, planes, blocks, stride=1, pool=False):
+    def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
                 conv1x1(self.inplanes, planes * block.expansion, stride),
-                nn.BatchNorm2d(planes * block.expansion),
+                nn.BatchNorm2d(planes * block.expansion),   ##### no bn here in tf
             )
 
-        maxpool = None
-        if pool:
-            maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, maxpool))
+        layers.append(block(self.inplanes, planes, stride, downsample))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes))
@@ -158,6 +148,7 @@ class ResNetV2(nn.Module):
 
     def forward(self, x):
         x = self.conv1(x)
+        x = self.maxpool(x)
 
         x = self.layer1(x)
         x = self.layer2(x)
