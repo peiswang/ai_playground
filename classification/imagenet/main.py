@@ -3,9 +3,12 @@ import os
 import random
 import shutil
 import time
+import math
 import warnings
 import sys
 from datetime import datetime
+from collections import OrderedDict
+import math
 
 import torch
 import torch.nn as nn
@@ -46,11 +49,19 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
+parser.add_argument('--lr_policy', default='step',
+                    help='lr policy')
+parser.add_argument('--warmup-epochs', default=0, type=int, metavar='N',
+                    help='number of warmup epochs')
+parser.add_argument('--warmup-lr-multiplier', default=0.1, type=float, metavar='W',
+                    help='warmup lr multiplier')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)',
+                    metavar='W', help='weight decay (default: 1-4)',
                     dest='weight_decay')
+parser.add_argument('--power', default=1.0, type=float,
+                    metavar='P', help='power for poly learning-rate decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -217,6 +228,8 @@ def main_worker(gpu, ngpus_per_node, args):
             normalize,
         ]))
 
+    args.epoch_size = len(train_dataset) // args.batch_size
+
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -244,7 +257,7 @@ def main_worker(gpu, ngpus_per_node, args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        adjust_learning_rate(optimizer, epoch, args)
+        # adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args)
@@ -278,7 +291,19 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
+
+    if args.lr_policy == 'step':
+        local_lr = adjust_learning_rate(optimizer, epoch, args)
+    elif args.lr_policy == 'epoch_poly':
+        local_lr = adjust_learning_rate_epoch_poly(optimizer, epoch, args)
+        
+
     for i, (input, target) in enumerate(train_loader):
+        global_iter = epoch * args.epoch_size + i
+        if args.lr_policy == 'iter_poly':
+            local_lr = adjust_learning_rate_poly(optimizer, global_iter, args)
+        elif args.lr_policy == 'cosine':
+            local_lr = adjust_learning_rate_cosine(optimizer, global_iter, args)
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -311,9 +336,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f})\t'
+                  'LR: {lr: .6f}'.format(
                    epoch, i, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, top1=top1, top5=top5))
+                   data_time=data_time, loss=losses, top1=top1, top5=top5, lr=local_lr))
 
 
 def validate(val_loader, model, criterion, args):
@@ -400,7 +426,34 @@ def adjust_learning_rate(optimizer, epoch, args):
     lr = args.lr * (0.1 ** (epoch // 30))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+    
+def adjust_learning_rate_epoch_poly(optimizer, epoch, args):
+    """Sets epoch poly learning rate"""
+    lr = args.lr * ((1 - epoch * 1.0 / args.epochs) ** args.power)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    return lr
 
+def adjust_learning_rate_poly(optimizer, global_iter, args):
+    """Sets iter poly learning rate"""
+    lr = args.lr * ((1 - global_iter * 1.0 / (args.epochs * args.epoch_size)) ** args.power)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    return lr
+
+def adjust_learning_rate_cosine(optimizer, global_iter, args):
+    warmup_lr = args.lr * args.warmup_lr_multiplier
+    max_iter = args.epochs * args.epoch_size
+    warmup_iter = args.warmup_epochs * args.epoch_size
+    if global_iter < warmup_iter:
+        slope = (args.lr - warmup_lr) / warmup_iter
+        lr = slope * global_iter + warmup_lr
+    else:
+        lr = 0.5 * args.lr * (1 + math.cos(math.pi * (global_iter - warmup_iter) / (max_iter - warmup_iter)))
+    
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    return lr
 
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
